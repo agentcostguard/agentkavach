@@ -1,0 +1,87 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agentkavach"
+version = "1.0.0"
+description = "Hard budget limits and guardrails for LLM APIs (OpenAI, Anthropic, Google, Mistral)."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.9"
+authors = [{ name = "AgentKavach", email = "agentcostguard@gmail.com" }]
+maintainers = [{ name = "AgentKavach", email = "agentcostguard@gmail.com" }]
+keywords = [
+    "llm",
+    "openai",
+    "anthropic",
+    "google",
+    "mistral",
+    "budget",
+    "cost-tracking",
+    "guardrails",
+    "observability",
+    "opentelemetry",
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: System :: Monitoring",
+    "Typing :: Typed",
+]
+dependencies = [
+    "openai",
+    "httpx",
+    "tiktoken",
+    "pyyaml",
+    "opentelemetry-api",
+    "opentelemetry-sdk",
+]
+
+[project.optional-dependencies]
+anthropic = ["anthropic>=0.25"]
+mistral = ["mistralai"]
+google = ["google-genai>=1.0"]
+all = ["anthropic>=0.25", "mistralai", "google-genai>=1.0"]
+dev = ["pytest", "pytest-asyncio", "pytest-xdist", "ruff", "httpx", "build", "twine"]
+
+[project.urls]
+Homepage = "https://agentkavach.com"
+Documentation = "https://agentkavach.com/public/docs"
+Repository = "https://github.com/agentcostguard/agentkavach"
+Issues = "https://github.com/agentcostguard/agentkavach/issues"
+Changelog = "https://github.com/agentcostguard/agentkavach/blob/main/CHANGELOG.md"
+
+[tool.hatch.build.targets.wheel]
+packages = ["agentkavach"]
+
+[tool.hatch.build.targets.sdist]
+include = ["/agentkavach", "/README.md", "/LICENSE", "/CHANGELOG.md", "/pyproject.toml"]
+
+[tool.ruff]
+target-version = "py39"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["agentkavach"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "real_tracer: construct a real OTel tracer in the client (opts out of the autouse tracer-disable fixture in tests/conftest.py)",
+]
