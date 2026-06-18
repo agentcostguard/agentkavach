@@ -54,7 +54,7 @@ anthropic = ["anthropic>=0.25"]
 mistral = ["mistralai"]
 google = ["google-genai>=1.0"]
 all = ["anthropic>=0.25", "mistralai", "google-genai>=1.0"]
-dev = ["pytest", "pytest-asyncio", "pytest-xdist", "ruff", "httpx", "build", "twine"]
+dev = ["pytest", "pytest-asyncio", "pytest-xdist", "ruff==0.15.16", "httpx", "build", "twine"]
 
 [project.urls]
 Homepage = "https://agentkavach.com"
