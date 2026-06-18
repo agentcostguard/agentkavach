@@ -37,16 +37,7 @@ AgentKavach is a circuit breaker for that problem. It sits in front of your LLM 
 pip install agentkavach
 ```
 
-Provider SDKs are optional extras. Install the ones you use:
-
-```bash
-pip install "agentkavach[anthropic]"
-pip install "agentkavach[google]"
-pip install "agentkavach[mistral]"
-pip install "agentkavach[all]"
-```
-
-AgentKavach supports Python 3.9 and later.
+AgentKavach supports Python 3.9 and later. OpenAI works out of the box. To use Anthropic, Google, or Mistral, install that provider's own SDK alongside it.
 
 ## Quickstart
 
@@ -66,6 +57,8 @@ response = guard.create(
     messages=[{"role": "user", "content": "Summarize today's headlines."}],
 )
 ```
+
+> Your provider key (`llm_key`) stays in your process. It is used only to call the provider directly from your machine and is never sent to AgentKavach.
 
 `guard.create(...)` mirrors the underlying provider client, so you can drop it into existing code with minimal changes. Before each call the engine checks the running spend. As usage crosses the configured thresholds it sends alerts, and once the budget is exhausted the next call raises `BudgetExceededError` instead of reaching the provider.
 
@@ -134,12 +127,12 @@ A threshold of `0.8` fires when usage reaches 80 percent of the budget. The opti
 
 One API across four providers. Set `provider` and pass the matching key as `llm_key`:
 
-| Provider  | `provider` value | Install extra |
-| --------- | ---------------- | ------------- |
-| OpenAI    | `"openai"`       | included      |
-| Anthropic | `"anthropic"`    | `[anthropic]` |
-| Google    | `"google"`       | `[google]`    |
-| Mistral   | `"mistral"`      | `[mistral]`   |
+| Provider  | `provider` value |
+| --------- | ---------------- |
+| OpenAI    | `"openai"`       |
+| Anthropic | `"anthropic"`    |
+| Google    | `"google"`       |
+| Mistral   | `"mistral"`      |
 
 ## Security and privacy
 
