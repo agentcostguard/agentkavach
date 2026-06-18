@@ -1,0 +1,82 @@
+name: Publish to PyPI
+
+on:
+  release:
+    types: [published]
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+  id-token: write  # Required for trusted publishing
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install build tools
+        run: pip install build
+      - name: Build package
+        run: python -m build
+      - name: Verify package
+        run: |
+          pip install dist/*.whl
+          # Pure-Python import (loads no native code). Retry only to absorb a
+          # transient runner crash; a real import break fails all attempts.
+          for attempt in 1 2 3; do
+            python -c "import agentkavach; print(f'agentkavach {agentkavach.__version__}')" && exit 0
+            echo "::warning::verify import attempt $attempt failed — retrying"; sleep 3
+          done
+          echo "::error::verify import failed after 3 attempts"; exit 1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.9", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Install from wheel
+        run: pip install dist/*.whl
+      - name: Smoke test
+        run: |
+          # scripts/release_smoke.py loads no native code (provider SDKs +
+          # tiktoken import lazily), so it's deterministic: a real import/API
+          # break fails all 3 attempts and still blocks the publish, while a
+          # one-off runner SIGSEGV (exit 139) is absorbed — no flaky publishes,
+          # no masking of real failures.
+          for attempt in 1 2 3; do
+            python scripts/release_smoke.py && exit 0
+            echo "::warning::smoke attempt $attempt failed — retrying"; sleep 3
+          done
+          echo "::error::smoke failed after 3 attempts"; exit 1
+
+  publish-pypi:
+    needs: test
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
