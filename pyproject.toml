@@ -51,9 +51,11 @@ dependencies = [
 
 [project.optional-dependencies]
 anthropic = ["anthropic>=0.25"]
-mistral = ["mistralai"]
+# Pinned <2: the provider uses the mistralai 1.x API (`from mistralai import
+# Mistral`); mistralai 2.x reorganized the package and breaks that import.
+mistral = ["mistralai>=1,<2"]
 google = ["google-genai>=1.0"]
-all = ["anthropic>=0.25", "mistralai", "google-genai>=1.0"]
+all = ["anthropic>=0.25", "mistralai>=1,<2", "google-genai>=1.0"]
 dev = ["pytest", "pytest-asyncio", "pytest-xdist", "ruff==0.15.16", "httpx", "build", "twine"]
 
 [project.urls]
