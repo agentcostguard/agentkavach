@@ -435,7 +435,7 @@ class AgentKavachExporter(SpanExporter):
         Phase 35 fixes:
         - **idempotency_key** is now always emitted (sourced from a per-call
           UUID set by the client wrapper). Server's dedup path requires
-          this to avoid double-counting on Kafka at-least-once redelivery.
+          this to avoid double-counting on at-least-once redelivery.
         - **timestamp** falls back to ``datetime.now(UTC)`` if the span
           never set ``start_time``. Previously this could be ``None``
           and the server's ``IngestEvent`` (str required) would 422
