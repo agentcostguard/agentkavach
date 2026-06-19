@@ -4,6 +4,14 @@ All notable changes to the AgentKavach Python SDK are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project follows [Semantic Versioning](https://semver.org/).
 
+## [1.0.2] - 2026-06-19
+
+First release published from this public repository with verified build provenance (PyPI Trusted Publishing). Functionally equivalent to 1.0.1 plus the dependency fix below.
+
+### Fixed
+
+- Pin `mistralai>=1,<2`. mistralai 2.x reorganized its package and no longer exposes `from mistralai import Mistral`, which the Mistral provider relies on, so `pip install agentkavach[all]` or `agentkavach[mistral]` could install a broken release. The supported line is 1.x.
+
 ## [1.0.0] - 2026-06-18
 
 ### Changed
