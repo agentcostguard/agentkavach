@@ -31,6 +31,8 @@ An AI agent can spend money on every API call. When one gets stuck in a loop or 
 
 AgentKavach is a circuit breaker for that problem. It sits in front of your LLM client, checks the running spend before each call, raises alerts as usage approaches a limit, and refuses further calls once the budget is reached. The check runs locally and in memory, so enforcement does not depend on a network round trip.
 
+You pass both keys explicitly: your AgentKavach key (`api_key`) and your provider key (`llm_key`). The SDK never reads them from the environment. Your provider key is used only inside your process to call the provider directly. It is never read from the environment, never written to disk, and never sent to AgentKavach.
+
 ## Installation
 
 ```bash
@@ -58,7 +60,7 @@ response = guard.create(
 )
 ```
 
-> Your provider key (`llm_key`) stays in your process. It is used only to call the provider directly from your machine and is never sent to AgentKavach.
+> Both `api_key` and `llm_key` are required and must be passed explicitly to the constructor. The SDK never reads them from the environment, so supply them yourself, for example `api_key=os.environ["AGENTKAVACH_API_KEY"]`. If either is missing the constructor raises `ValueError` immediately. Your provider key (`llm_key`) stays in your process: it is used only to call the provider directly, is never read from the environment, is never written to disk, and is never sent to AgentKavach.
 
 `guard.create(...)` mirrors the underlying provider client, so you can drop it into existing code with minimal changes. Before each call the engine checks the running spend. As usage crosses the configured thresholds it sends alerts, and once the budget is exhausted the next call raises `BudgetExceededError` instead of reaching the provider.
 
@@ -138,7 +140,8 @@ One API across four providers. Set `provider` and pass the matching key as `llm_
 
 This SDK handles your provider key, so here is exactly what it does with your data. Every line is open and MIT licensed, so you can verify these claims yourself.
 
-- Your provider key (`llm_key`) stays in your process. It is used only to call the provider directly from your machine and is never sent to AgentKavach.
+- Your provider key (`llm_key`) is passed explicitly to the constructor. The SDK never reads it from the environment, never writes it to disk, and never sends it to AgentKavach. It is held only in memory, used solely to call the provider directly from your process.
+- Your AgentKavach key (`api_key`) is likewise passed explicitly and used only to authenticate spend-tracking requests to the AgentKavach backend. If an api_key is expired or revoked, your LLM calls keep running — the SDK simply stops sending spend data once the backend rejects the key, so a lapsed key never takes your application down.
 - For spend tracking and alerts, the SDK reports the following to the AgentKavach backend on each call: agent name, provider, model, input and output token counts, computed cost, duration, timestamp, and a run identifier.
 - Prompt and response text is sent only when you opt in with `save_prompts=True`. It is off by default.
 - The budget check runs in your process and in memory, so enforcement does not wait on a network call.

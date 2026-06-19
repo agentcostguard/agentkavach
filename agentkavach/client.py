@@ -59,7 +59,7 @@ logger = logging.getLogger(__name__)
 # Phase 53: cap stored prompt text at 2 kB. Mirrored server-side in
 # server/ingest.py:MAX_PROMPT_CHARS so direct API users can't bypass.
 # Two layers because:
-#   1. SDK cap keeps wire payloads small (cheaper Kafka, cheaper egress).
+#   1. SDK cap keeps wire payloads small (cheaper ingest, cheaper egress).
 #   2. Server cap is the actual security boundary — SDK could be skipped.
 MAX_PROMPT_CHARS: int = 2048
 _PROMPT_TRUNCATION_SUFFIX = "... [truncated]"
@@ -1263,9 +1263,9 @@ class AgentKavach:
         """Record an OTel span for the call.
 
         Phase 35: emit ``agentkavach.idempotency_key`` per span. The
-        server uses this for dedup on Kafka at-least-once redelivery —
+        server uses this for dedup on at-least-once redelivery —
         without it, a single LLM call's event can be counted multiple
-        times if Kafka retries the message, silently inflating costs
+        times if the pipeline retries the message, silently inflating costs
         and tripping budgets prematurely.
 
         Phase 59 (B2): if *idempotency_key* is passed in, use it
