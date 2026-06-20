@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agentkavach"
-version = "1.0.2"
+version = "2.0.0"
 description = "Hard budget limits and guardrails for LLM APIs (OpenAI, Anthropic, Google, Mistral)."
 readme = "README.md"
 license = "MIT"

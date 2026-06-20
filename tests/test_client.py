@@ -744,9 +744,10 @@ class TestResolveChannelCreds:
         assert result == {"slack_webhook_url": "https://hooks.slack.com/x"}
 
     def test_email(self):
+        # api_key is no longer read; only the recipient is captured.
         defs = {"email": {"type": "email", "to": "team@acme.com", "api_key": "re_test"}}
         result = _resolve_channel_creds(defs)
-        assert result == {"alert_email": "team@acme.com", "resend_api_key": "re_test"}
+        assert result == {"alert_email": "team@acme.com"}
 
     def test_pagerduty(self):
         defs = {"pagerduty": {"type": "pagerduty", "routing_key": "R0xxx"}}
@@ -774,8 +775,7 @@ class TestResolveChannelCreds:
 
 
 class TestYamlChannels:
-    @patch("agentkavach.channels.slack.httpx.Client")
-    def test_yaml_with_channels_section(self, mock_cls, tmp_path):
+    def test_yaml_with_channels_section(self, tmp_path):
         config = tmp_path / "config.yaml"
         config.write_text(
             textwrap.dedent("""\
@@ -783,7 +783,6 @@ class TestYamlChannels:
               slack:
                 type: slack
                 webhook_url: https://hooks.slack.com/x
-                dispatch: sdk
 
             agents:
               bot-a:
@@ -795,8 +794,14 @@ class TestYamlChannels:
         )
         clients = AgentKavach.from_yaml(str(config), api_key="ak_test", llm_key="sk-test")
         assert "bot-a" in clients
-        # dispatch: sdk → the SDK registers a client-side handler for delivery.
-        assert "slack" in clients["bot-a"]._dispatcher._channels
+        guard = clients["bot-a"]
+        # The cloud delivers slack → no client-side handler is registered.
+        assert "slack" not in guard._dispatcher._channels
+        # ...but the slack target is captured and synced for cloud delivery.
+        payload = guard._build_sync_payload()
+        acs = {ac["channel"]: ac for ac in payload["alert_configs"]}
+        assert acs["slack"]["target"] == "https://hooks.slack.com/x"
+        assert "dispatch" not in acs["slack"]
 
     def test_yaml_channels_rejects_undefined_reference(self, tmp_path):
         config = tmp_path / "config.yaml"
@@ -834,8 +839,7 @@ class TestYamlChannels:
         rules = clients["bot-a"]._dispatcher.rules
         assert len(rules) == 2
 
-    @patch("agentkavach.channels.slack.httpx.Client")
-    def test_yaml_slack_with_env_var_interpolation(self, mock_cls, tmp_path, monkeypatch):
+    def test_yaml_slack_with_env_var_interpolation(self, tmp_path, monkeypatch):
         monkeypatch.setenv("AGENTKAVACH_SLACK_WEBHOOK_URL", "https://hooks.slack.com/env-yaml")
         config = tmp_path / "config.yaml"
         config.write_text(
@@ -844,7 +848,6 @@ class TestYamlChannels:
               slack:
                 type: slack
                 webhook_url: https://hooks.slack.com/env-yaml
-                dispatch: sdk
 
             agents:
               bot-slack:
@@ -854,13 +857,17 @@ class TestYamlChannels:
         """)
         )
         clients = AgentKavach.from_yaml(str(config), api_key="ak_test", llm_key="sk-test")
-        assert "slack" in clients["bot-slack"]._dispatcher._channels
+        guard = clients["bot-slack"]
+        # Cloud-delivered → no client-side handler, but target is synced.
+        assert "slack" not in guard._dispatcher._channels
+        payload = guard._build_sync_payload()
+        acs = {ac["channel"]: ac for ac in payload["alert_configs"]}
+        assert acs["slack"]["target"] == "https://hooks.slack.com/env-yaml"
 
-    @patch("agentkavach.channels.slack.httpx.Client")
-    def test_yaml_backend_slack_not_registered_client_side(self, mock_cls, tmp_path):
-        """Default (backend) dispatch slack produces a rule but no client-side handler.
+    def test_yaml_backend_slack_not_registered_client_side(self, tmp_path):
+        """A slack channel produces a rule but no client-side handler.
 
-        The backend delivers it, so the SDK must NOT register a local dispatcher
+        The cloud delivers it, so the SDK must NOT register a local dispatcher
         channel for it (that would double-deliver).
         """
         config = tmp_path / "config.yaml"
@@ -885,8 +892,7 @@ class TestYamlChannels:
         # ...but the rule still exists (so it appears in the synced config).
         assert any("slack" in r.channels for r in dispatcher.rules)
 
-    @patch("agentkavach.channels.slack.httpx.Client")
-    def test_yaml_slack_at_multiple_thresholds(self, mock_cls, tmp_path):
+    def test_yaml_slack_at_multiple_thresholds(self, tmp_path):
         config = tmp_path / "config.yaml"
         config.write_text(
             textwrap.dedent("""\
@@ -909,65 +915,60 @@ class TestYamlChannels:
         assert len(rules) == 3
         assert all("slack" in r.channels for r in rules)
 
-    @patch("agentkavach.channels.webhook.httpx.Client")
-    @patch("agentkavach.channels.slack.httpx.Client")
-    def test_yaml_internal_endpoints_docs_example(self, mock_slack, mock_wh, tmp_path):
-        """End-to-end load of the Internal Endpoints docs YAML: distinct channel
-        names, two webhooks of the same type, mixed backend/sdk dispatch.
+    def test_yaml_internal_endpoints_docs_example(self, tmp_path):
+        """End-to-end load of the multi-channel docs YAML: distinct channel
+        names and types.
 
         Regression guard for the docs example — it must actually load and route
-        correctly through from_yaml.
+        correctly through from_yaml. Every channel is cloud-delivered, so none
+        register a client-side handler and every target (plus webhook secret) is
+        synced.
         """
         config = tmp_path / "config.yaml"
         config.write_text(
             textwrap.dedent("""\
             channels:
-              public_hook:
+              signed_hook:
                 type: webhook
-                url: https://hooks.example.com/public
-              internal_slack:
-                type: slack
-                webhook_url: https://mattermost.internal/hooks/abc
-                dispatch: sdk
-              internal_hook:
-                type: webhook
-                url: http://10.0.0.5/budget-alerts
+                url: https://hooks.example.com/budget-alerts
                 secret: s3cr3t
-                dispatch: sdk
+              team_slack:
+                type: slack
+                webhook_url: https://hooks.slack.com/abc
+              ops_page:
+                type: pagerduty
+                routing_key: R0xxx
 
             agents:
               research-bot:
                 provider: openai
                 budget: { type: daily, limit: 50 }
                 alerts:
-                  - { threshold: 0.50, channels: [internal_slack] }
-                  - { threshold: 0.80, channels: [public_hook] }
-                  - { threshold: 0.90, channels: [internal_hook] }
+                  - { threshold: 0.50, channels: [team_slack] }
+                  - { threshold: 0.80, channels: [ops_page] }
+                  - { threshold: 0.90, channels: [signed_hook] }
         """)
         )
         clients = AgentKavach.from_yaml(str(config), api_key="ak_test", llm_key="sk-test")
         guard = clients["research-bot"]
         dispatcher = guard._dispatcher
-        # sdk channels are delivered client-side → registered + engine fires at
-        # their configured thresholds.
-        assert "slack" in dispatcher._channels
-        assert "webhook" in dispatcher._channels
-        assert 0.50 in guard._engine.thresholds
-        assert 0.90 in guard._engine.thresholds
-        # The public (backend) webhook does NOT add a client-side fire threshold.
-        # Build the sync payload and confirm dispatch routing per channel.
+        # No channel is delivered client-side — the cloud delivers them all.
+        assert "slack" not in dispatcher._channels
+        assert "webhook" not in dispatcher._channels
+        assert "pagerduty" not in dispatcher._channels
+        # Build the sync payload and confirm every target is synced, no dispatch.
         payload = guard._build_sync_payload()
         acs = {(a["channel"], a["threshold_pct"]): a for a in payload["alert_configs"]}
-        # public webhook → backend, target synced.
-        assert acs[("webhook", 0.80)]["dispatch"] == "backend"
-        assert acs[("webhook", 0.80)]["target"] == "https://hooks.example.com/public"
-        # internal webhook → sdk, target/secret NOT synced (kept local).
-        assert acs[("webhook", 0.90)]["dispatch"] == "sdk"
-        assert "target" not in acs[("webhook", 0.90)]
-        assert "secret" not in acs[("webhook", 0.90)]
-        # internal slack → sdk, url not synced.
-        assert acs[("slack", 0.50)]["dispatch"] == "sdk"
-        assert "target" not in acs[("slack", 0.50)]
+        # slack → target synced.
+        assert acs[("slack", 0.50)]["target"] == "https://hooks.slack.com/abc"
+        assert "dispatch" not in acs[("slack", 0.50)]
+        # pagerduty → routing key synced.
+        assert acs[("pagerduty", 0.80)]["target"] == "R0xxx"
+        assert "dispatch" not in acs[("pagerduty", 0.80)]
+        # signed webhook → target + secret synced.
+        assert acs[("webhook", 0.90)]["target"] == "https://hooks.example.com/budget-alerts"
+        assert acs[("webhook", 0.90)]["secret"] == "s3cr3t"
+        assert "dispatch" not in acs[("webhook", 0.90)]
 
 
 # ---------------------------------------------------------------------------
@@ -976,9 +977,9 @@ class TestYamlChannels:
 
 
 class TestBuildChannelConfigsFromYaml:
-    def test_credentials_and_dispatch_mapped_per_channel(self):
+    def test_credentials_mapped_per_channel(self):
         channel_defs = {
-            "slack": {"webhook_url": "https://hooks.slack/x", "dispatch": "sdk"},
+            "slack": {"webhook_url": "https://hooks.slack/x"},
             "pagerduty": {"routing_key": "R0xxx"},
             "email": {"to": "ops@acme.com"},
         }
@@ -989,27 +990,24 @@ class TestBuildChannelConfigsFromYaml:
         out = _build_channel_configs_from_yaml(alerts, channel_defs)
         by = {(c.channel_type, c.threshold): c for c in out}
         assert by[("slack", 0.5)].webhook_url == "https://hooks.slack/x"
-        assert by[("slack", 0.5)].dispatch == "sdk"
         assert by[("pagerduty", 0.8)].routing_key == "R0xxx"
-        assert by[("pagerduty", 0.8)].dispatch == "backend"  # default
         assert by[("email", 0.8)].to == "ops@acme.com"
 
-    def test_webhook_secret_and_email_api_key_carried(self):
+    def test_webhook_secret_carried(self):
         channel_defs = {
             "webhook": {
-                "url": "http://10.0.0.5/hook",
+                "url": "https://hooks.example.com/hook",
                 "secret": "sign-me",
-                "dispatch": "sdk",
             },
-            "email": {"to": "ops@acme.com", "api_key": "re_legacy"},
+            "email": {"to": "ops@acme.com"},
         }
         alerts = [{"threshold": 0.9, "channels": ["webhook", "email"]}]
         out = _build_channel_configs_from_yaml(alerts, channel_defs)
         webhook = next(c for c in out if c.channel_type == "webhook")
         email = next(c for c in out if c.channel_type == "email")
+        assert webhook.url == "https://hooks.example.com/hook"
         assert webhook.secret == "sign-me"
-        assert webhook.dispatch == "sdk"
-        assert email.api_key == "re_legacy"
+        assert email.to == "ops@acme.com"
 
     def test_action_kill_appends_kill_channel(self):
         # Legacy `action: kill` shorthand → a kill ChannelConfig is appended.
@@ -1054,43 +1052,39 @@ class TestBuildChannelConfigsFromYaml:
         out = _build_channel_configs_from_yaml(alerts, channel_defs)
         assert out[0].threshold == 0.6
 
-    def test_arbitrary_names_resolve_type_and_dispatch(self):
-        # Mirrors the Internal Endpoints docs example: a public webhook and an
-        # internal webhook declared under DISTINCT names, same `type: webhook`,
-        # with independent dispatch modes.
+    def test_arbitrary_names_resolve_type(self):
+        # Mirrors the multi-channel docs example: a public webhook and a signed
+        # webhook declared under DISTINCT names, same `type: webhook`, plus a
+        # slack channel. The channel NAME resolves to the underlying `type:`.
         channel_defs = {
             "public_hook": {"type": "webhook", "url": "https://hooks.example.com/public"},
-            "internal_slack": {
+            "team_slack": {
                 "type": "slack",
-                "webhook_url": "https://mattermost.internal/hooks/abc",
-                "dispatch": "sdk",
+                "webhook_url": "https://hooks.slack.com/abc",
             },
-            "internal_hook": {
+            "signed_hook": {
                 "type": "webhook",
-                "url": "http://10.0.0.5/budget-alerts",
+                "url": "https://hooks.example.com/budget-alerts",
                 "secret": "s3cr3t",
-                "dispatch": "sdk",
             },
         }
         alerts = [
-            {"threshold": 0.5, "channels": ["internal_slack"]},
+            {"threshold": 0.5, "channels": ["team_slack"]},
             {"threshold": 0.8, "channels": ["public_hook"]},
-            {"threshold": 0.9, "channels": ["internal_hook"]},
+            {"threshold": 0.9, "channels": ["signed_hook"]},
         ]
         out = _build_channel_configs_from_yaml(alerts, channel_defs)
         by = {c.threshold: c for c in out}
-        # public webhook → backend
+        # public webhook
         assert by[0.8].channel_type == "webhook"
         assert by[0.8].url == "https://hooks.example.com/public"
-        assert by[0.8].dispatch == "backend"
-        # internal slack → sdk
+        # slack
         assert by[0.5].channel_type == "slack"
-        assert by[0.5].dispatch == "sdk"
-        # internal webhook → sdk + secret
+        assert by[0.5].webhook_url == "https://hooks.slack.com/abc"
+        # signed webhook + secret
         assert by[0.9].channel_type == "webhook"
-        assert by[0.9].url == "http://10.0.0.5/budget-alerts"
+        assert by[0.9].url == "https://hooks.example.com/budget-alerts"
         assert by[0.9].secret == "s3cr3t"
-        assert by[0.9].dispatch == "sdk"
 
 
 # ---------------------------------------------------------------------------

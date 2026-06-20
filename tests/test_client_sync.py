@@ -280,11 +280,12 @@ class TestWebhookSynced:
         assert by_channel["webhook"]["secret"] == "sign-me"
 
 
-class TestDispatchModeSync:
-    """Phase 158: the dispatch mode is synced; sdk-mode channels do NOT ship
-    their (internal) URL/secret to the backend — the SDK delivers them."""
+class TestAllChannelsSynced:
+    """The cloud delivers every channel, so the SDK always syncs the channel
+    target (and webhook secret) for every channel that has one — with NO
+    ``dispatch`` key in the payload."""
 
-    def test_sdk_mode_omits_target_and_secret(self):
+    def test_every_channel_target_and_secret_synced(self):
         from agentkavach.alerts import ChannelConfig, ChannelType
 
         guard = _make_guard(
@@ -294,14 +295,12 @@ class TestDispatchModeSync:
                     threshold=0.05,
                     url="http://10.0.0.5/alerts",
                     secret="internal-secret",
-                    dispatch="sdk",
                     budget_type="cost",
                 ),
                 ChannelConfig(
                     channel_type=ChannelType.SLACK,
                     threshold=0.07,
                     webhook_url="https://hooks.slack.com/public",
-                    dispatch="backend",
                     budget_type="cost",
                 ),
             ]
@@ -309,10 +308,10 @@ class TestDispatchModeSync:
         payload = guard._build_sync_payload()
         acs = payload.get("alert_configs") or payload.get("org_alert_configs") or []
         by_channel = {ac["channel"]: ac for ac in acs}
-        # sdk webhook: dispatch synced, but NO internal url/secret leaked.
-        assert by_channel["webhook"]["dispatch"] == "sdk"
-        assert "target" not in by_channel["webhook"]
-        assert "secret" not in by_channel["webhook"]
-        # backend slack: dispatch + public target synced.
-        assert by_channel["slack"]["dispatch"] == "backend"
+        # webhook: target + secret synced, never a dispatch key.
+        assert by_channel["webhook"]["target"] == "http://10.0.0.5/alerts"
+        assert by_channel["webhook"]["secret"] == "internal-secret"
+        assert "dispatch" not in by_channel["webhook"]
+        # slack: public target synced, never a dispatch key.
         assert by_channel["slack"]["target"] == "https://hooks.slack.com/public"
+        assert "dispatch" not in by_channel["slack"]

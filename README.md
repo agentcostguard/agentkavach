@@ -151,7 +151,7 @@ This SDK handles your provider key, so here is exactly what it does with your da
 1. Before a call, the engine reads the running spend for the active budget and compares it to the limit.
 2. If the limit is already reached, it raises `BudgetExceededError` and the call never goes out.
 3. Otherwise it forwards the call to the provider, then records the actual cost and usage and checks the configured thresholds.
-4. If a threshold was crossed, it dispatches the matching alerts.
+4. If the budget is exhausted, the local kill switch runs your `on_kill` teardown. Alert delivery (email, Slack, PagerDuty, webhook) is performed by the AgentKavach cloud, which aggregates spend across all of your agents and fires each alert once at the true combined total — so a budget shared by many agents alerts correctly instead of each process seeing only its own slice.
 
 AgentKavach is designed to fail open. If anything inside the SDK raises an unexpected error, your LLM call still proceeds. Only the budget and guardrail errors are allowed to propagate.
 
