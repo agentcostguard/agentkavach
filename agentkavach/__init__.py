@@ -1,6 +1,6 @@
 """AgentKavach: Hard budget limits for LLM APIs."""
 
-__version__ = "1.0.2"
+__version__ = "2.0.0"
 
 from agentkavach.alerts import ChannelConfig, ChannelType
 from agentkavach.budget import Budget

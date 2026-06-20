@@ -163,7 +163,6 @@ class AgentKavach:
         endpoint: Optional[str] = None,
         buffer_path: Optional[str] = None,
         slack_webhook_url: str = "",
-        resend_api_key: str = "",
         alert_email: str = "",
         pagerduty_routing_key: str = "",
         webhook_url: str = "",
@@ -249,16 +248,11 @@ class AgentKavach:
             run_id = str(uuid.uuid4())
         self._run_id = run_id
 
-        # SDK-dispatched channels are delivered client-side at their CONFIGURED
-        # thresholds, so the engine must fire at those (not just the defaults).
-        # Backend-dispatched channels are evaluated + delivered server-side, so
-        # their thresholds don't need to be added here.
+        # The engine fires locally at these thresholds to drive the kill switch
+        # and the on_kill teardown. Alert *delivery* at every threshold is done
+        # by the cloud, which evaluates against spend aggregated across all
+        # agents — so a shared budget fires once at the true combined total.
         _engine_thresholds = thresholds or (0.70, 0.90, 1.0)
-        _sdk_thresholds = {
-            c.threshold for c in (channels or []) if getattr(c, "dispatch", "backend") == "sdk"
-        }
-        if _sdk_thresholds:
-            _engine_thresholds = tuple(sorted(set(_engine_thresholds) | _sdk_thresholds))
 
         # Core engine: all budget math happens here.
         self._engine = SpendEngine(
@@ -293,18 +287,16 @@ class AgentKavach:
                 lambda event, template=None: on_kill(),
             )
 
-        # Register channel handlers.
+        # Channel delivery is performed by the cloud. We only capture each
+        # channel's target here so it can be synced (see _build_sync_payload).
+        # The one in-process handler is "kill" (registered above via on_kill).
+        # ``_channels`` is retained for shutdown() but stays empty — nothing is
+        # delivered client-side anymore.
         self._channels: List[Any] = []
-        # Keep the raw ChannelConfig list so the sync payload can recover the
-        # email recipient even when SDK-side registration failed (e.g. backend
-        # is the email sender — customer provides only `to`, never `api_key`).
         self._channel_configs: List[ChannelConfig] = list(channels) if channels else []
-        if channels is not None:
-            self._register_channel_configs(channels)
-        else:
-            self._register_channels(
+        if channels is None:
+            self._capture_legacy_channels(
                 slack_webhook_url=slack_webhook_url,
-                resend_api_key=resend_api_key,
                 alert_email=alert_email,
                 pagerduty_routing_key=pagerduty_routing_key,
                 webhook_url=webhook_url,
@@ -421,9 +413,7 @@ class AgentKavach:
         routing_key: str = "",
         url: str = "",
         secret: str = "",
-        api_key: str = "",
         template: Optional[Dict[str, Any]] = None,
-        dispatch: str = "backend",
     ) -> ChannelConfig:
         """Create a ``ChannelConfig`` for inline configuration.
 
@@ -451,9 +441,7 @@ class AgentKavach:
             routing_key=routing_key,
             url=url,
             secret=secret,
-            api_key=api_key,
             template=template,
-            dispatch=dispatch,
         )
 
     @staticmethod
@@ -472,118 +460,47 @@ class AgentKavach:
             template=template,
         )
 
-    # -- Channel registration -----------------------------------------------
+    # -- Channel capture ----------------------------------------------------
 
-    def _register_channel_configs(self, channels: Sequence[ChannelConfig]) -> None:
-        """Register client-side handlers for the channels the SDK delivers.
-
-        Slack/PagerDuty/Webhook are SDK-delivered only when ``dispatch="sdk"``
-        (internal / on-prem / firewalled endpoints the backend can't reach).
-        With the default ``dispatch="backend"`` they are delivered by the cloud,
-        so we do NOT register them here — which also means a backend-dispatched
-        channel can never be double-delivered.
-
-        Email is special: it is delivered by the backend (our Resend key) unless
-        the customer supplies their own Resend ``api_key``, in which case the SDK
-        sends it client-side (the legacy path). ``kill`` is registered separately
-        via ``on_kill``.
-        """
-        for ch in channels:
-            if ch.channel_type == "kill":
-                continue  # Handled separately via on_kill registration.
-
-            try:
-                if ch.channel_type == "email":
-                    from agentkavach.channels.email import EmailChannel
-
-                    resend_key = ch.api_key
-                    # No api_key → backend-dispatch mode (customer provides only
-                    # `to`, our Resend key sends). The recipient still reaches the
-                    # backend via the sync-config payload (AlertConfig.target).
-                    if not resend_key:
-                        continue
-                    handler = EmailChannel(api_key=resend_key, to_email=ch.to)
-                    self._dispatcher.register_channel("email", handler.send)
-                    self._channels.append(handler)
-                    continue
-
-                # slack / pagerduty / webhook: SDK-delivered only in "sdk" mode.
-                if getattr(ch, "dispatch", "backend") != "sdk":
-                    continue  # backend-dispatched — the cloud delivers it.
-
-                if ch.channel_type == "slack":
-                    from agentkavach.channels.slack import SlackChannel
-
-                    handler = SlackChannel(webhook_url=ch.webhook_url)
-                    self._dispatcher.register_channel("slack", handler.send)
-                    self._channels.append(handler)
-
-                elif ch.channel_type == "pagerduty":
-                    from agentkavach.channels.pagerduty import PagerDutyChannel
-
-                    handler = PagerDutyChannel(routing_key=ch.routing_key)
-                    self._dispatcher.register_channel("pagerduty", handler.send)
-                    self._channels.append(handler)
-
-                elif ch.channel_type == "webhook":
-                    from agentkavach.channels.webhook import WebhookChannel
-
-                    handler = WebhookChannel(url=ch.url, secret=ch.secret)
-                    self._dispatcher.register_channel("webhook", handler.send)
-                    self._channels.append(handler)
-
-            except Exception:
-                logger.warning("Failed to register %s channel", ch.channel_type, exc_info=True)
-
-    def _register_channels(
+    def _capture_legacy_channels(
         self,
         slack_webhook_url: str,
-        resend_api_key: str,
         alert_email: str,
         pagerduty_routing_key: str,
         webhook_url: str,
         webhook_secret: str,
     ) -> None:
-        """Auto-register channel handlers based on available credentials (legacy)."""
+        """Capture channel targets from the legacy keyword arguments.
+
+        These are turned into ``ChannelConfig`` entries so their targets are
+        synced to the cloud, which performs delivery. Nothing is delivered
+        client-side. The threshold here is nominal — only the channel type and
+        target are used when resolving the sync payload. ``kill`` is handled
+        separately via ``on_kill``.
+        """
         if slack_webhook_url:
-            try:
-                from agentkavach.channels.slack import SlackChannel
-
-                ch = SlackChannel(webhook_url=slack_webhook_url)
-                self._dispatcher.register_channel("slack", ch.send)
-                self._channels.append(ch)
-            except Exception:
-                logger.warning("Failed to register Slack channel", exc_info=True)
-
-        if resend_api_key and alert_email:
-            try:
-                from agentkavach.channels.email import EmailChannel
-
-                ch = EmailChannel(api_key=resend_api_key, to_email=alert_email)
-                self._dispatcher.register_channel("email", ch.send)
-                self._channels.append(ch)
-            except Exception:
-                logger.warning("Failed to register email channel", exc_info=True)
-
+            self._channel_configs.append(
+                ChannelConfig(channel_type="slack", threshold=1.0, webhook_url=slack_webhook_url)
+            )
+        if alert_email:
+            self._channel_configs.append(
+                ChannelConfig(channel_type="email", threshold=1.0, to=alert_email)
+            )
         if pagerduty_routing_key:
-            try:
-                from agentkavach.channels.pagerduty import PagerDutyChannel
-
-                ch = PagerDutyChannel(routing_key=pagerduty_routing_key)
-                self._dispatcher.register_channel("pagerduty", ch.send)
-                self._channels.append(ch)
-            except Exception:
-                logger.warning("Failed to register PagerDuty channel", exc_info=True)
-
+            self._channel_configs.append(
+                ChannelConfig(
+                    channel_type="pagerduty", threshold=1.0, routing_key=pagerduty_routing_key
+                )
+            )
         if webhook_url:
-            try:
-                from agentkavach.channels.webhook import WebhookChannel
-
-                ch = WebhookChannel(url=webhook_url, secret=webhook_secret)
-                self._dispatcher.register_channel("webhook", ch.send)
-                self._channels.append(ch)
-            except Exception:
-                logger.warning("Failed to register webhook channel", exc_info=True)
+            self._channel_configs.append(
+                ChannelConfig(
+                    channel_type="webhook",
+                    threshold=1.0,
+                    url=webhook_url,
+                    secret=webhook_secret,
+                )
+            )
 
     # -- Properties ---------------------------------------------------------
 
@@ -1480,26 +1397,20 @@ class AgentKavach:
         # / duration) instead of defaulting to cost.
         for rule in self._dispatcher.rules:
             for channel in rule.channels:
-                mode = self._channel_dispatch_mode(channel, rule.threshold)
                 ac: Dict[str, Any] = {
                     "channel": channel,
                     "threshold_pct": rule.threshold,
                     "budget_type": getattr(rule, "budget_type", "cost"),
-                    "dispatch": mode,
                 }
-                # Only backend-dispatched channels need their endpoint synced —
-                # the backend uses it to deliver. For sdk-dispatched channels the
-                # SDK delivers locally, so we deliberately do NOT ship the
-                # (often internal) URL/secret to the cloud; the backend just
-                # records the alert for the dashboard.
-                if mode == "backend":
-                    target = self._resolve_channel_target(channel)
-                    if target:
-                        ac["target"] = target
-                    if channel == "webhook":
-                        secret = self._resolve_webhook_secret()
-                        if secret:
-                            ac["secret"] = secret
+                # The cloud delivers every channel, so it always needs the
+                # customer-owned target (and the webhook signing secret).
+                target = self._resolve_channel_target(channel)
+                if target:
+                    ac["target"] = target
+                if channel == "webhook":
+                    secret = self._resolve_webhook_secret()
+                    if secret:
+                        ac["secret"] = secret
                 alert_configs.append(ac)
 
         # Org budget
@@ -1560,16 +1471,8 @@ class AgentKavach:
                 return cc.secret
         return None
 
-    def _channel_dispatch_mode(self, channel: str, threshold: float) -> str:
-        """Return the dispatch mode ('backend' | 'sdk') for the channel config
-        matching (channel_type, threshold). Defaults to 'backend'."""
-        for cc in self._channel_configs:
-            if cc.channel_type == channel and cc.threshold == threshold:
-                return getattr(cc, "dispatch", "backend")
-        return "backend"
-
     def _find_email_target(self) -> Optional[str]:
-        """Extract email target so the backend can route the alert.
+        """Extract email target so the cloud can route the alert.
 
         Prefer the registered handler (it confirms client-side dispatch
         succeeded), but fall back to the original ChannelConfig list —
@@ -1658,10 +1561,10 @@ class AgentKavach:
 
             if channels_config:
                 # Modern path: a channels: section means we can build full
-                # ChannelConfig objects (credentials + per-channel dispatch
-                # mode), so YAML gets the same backend/sdk routing as the
-                # inline channels= API. _parse_alerts still validates the
-                # channel names against the defined channels.
+                # ChannelConfig objects (channel target + budget dimension), so
+                # YAML gets the same cloud-delivered alerting as the inline
+                # channels= API. _parse_alerts still validates the channel
+                # names against the defined channels.
                 _parse_alerts(merged.get("alerts", []), channel_defs)
                 channel_configs = _build_channel_configs_from_yaml(
                     merged.get("alerts", []), channel_defs
@@ -1825,9 +1728,9 @@ def _build_channel_configs_from_yaml(
     """Build ChannelConfig objects from YAML alerts + channel defs.
 
     Produces one ChannelConfig per (alert threshold × channel), carrying the
-    channel's credentials and its per-channel ``dispatch`` mode. Used when a
-    ``channels:`` section is present so YAML configs get the same dispatch
-    routing (backend vs sdk) as the inline ``channels=`` API.
+    channel's target + budget dimension. Used when a ``channels:`` section is
+    present so YAML configs get the same cloud-delivered alerting as the inline
+    ``channels=`` API.
     """
     out: List[ChannelConfig] = []
     for cfg in alert_configs:
@@ -1849,11 +1752,11 @@ def _build_channel_configs_from_yaml(
             # The alert references a channel by its NAME (the key in the
             # channels: section). The real channel TYPE comes from that def's
             # `type:` field — so you can declare several channels of the same
-            # type (e.g. a public webhook + an internal webhook) under distinct
-            # names with independent dispatch modes.
+            # type (e.g. two webhooks to different endpoints) under distinct
+            # names.
             cdef = channel_defs.get(ch, {})
             ch_type = cdef.get("type", ch)
-            kw: Dict[str, Any] = {"dispatch": cdef.get("dispatch", "backend")}
+            kw: Dict[str, Any] = {}
             if btype is not None:
                 kw["budget_type"] = btype
             cred_key = _YAML_CRED_KEY.get(ch_type)
@@ -1861,8 +1764,6 @@ def _build_channel_configs_from_yaml(
                 kw[cred_key] = cdef[cred_key]
             if ch_type == "webhook" and "secret" in cdef:
                 kw["secret"] = cdef["secret"]
-            if ch_type == "email" and "api_key" in cdef:
-                kw["api_key"] = cdef["api_key"]
             template = cfg.get("template")
             if template is not None:
                 kw["template"] = template
@@ -1903,8 +1804,6 @@ def _resolve_channel_creds(channel_defs: Dict[str, Dict]) -> Dict[str, str]:
         elif ch_type == "email":
             if "to" in cfg:
                 kwargs["alert_email"] = cfg["to"]
-            if "api_key" in cfg:
-                kwargs["resend_api_key"] = cfg["api_key"]
         elif ch_type == "pagerduty" and "routing_key" in cfg:
             kwargs["pagerduty_routing_key"] = cfg["routing_key"]
         elif ch_type == "webhook":

@@ -1,6 +1,6 @@
-"""Alert channel integrations — Slack, Email, PagerDuty, Webhook.
+"""Alert message templates.
 
-Each channel module exposes a ``send(event, template, config)`` function
-and a ``DEFAULT_TEMPLATE`` dict.  Channel handlers are registered with
-the ``AlertDispatcher`` at client init time.
+Channel *delivery* (Slack, Email, PagerDuty, Webhook) is handled by the
+AgentKavach cloud, which aggregates spend across all agents. This package
+keeps only the shared message templates used to render alert content.
 """

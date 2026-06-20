@@ -1,8 +1,12 @@
-"""Alert dispatch: Slack, PagerDuty, email hooks.
+"""Alert configuration + local kill handling.
 
-Client-side alert system that evaluates threshold events from the
-engine and dispatches notifications through configured channels.
-Includes cooldown logic to prevent alert storms.
+``ChannelConfig`` captures each alert channel (Slack, PagerDuty, webhook,
+email) and its trigger threshold. Channel *delivery* is performed entirely
+by the AgentKavach cloud, which aggregates spend across every agent and
+fires the alert at the true combined total — so a budget shared across many
+agents fires once, correctly, instead of each process evaluating only its
+own slice. The only thing handled in-process is the ``kill`` channel (the
+local ``on_kill`` teardown). Includes cooldown logic to prevent alert storms.
 """
 
 from __future__ import annotations
@@ -52,14 +56,18 @@ def _normalize_channel_type(value: Union[str, ChannelType]) -> str:
 class ChannelConfig:
     """Configuration for a single alert channel with its trigger threshold.
 
-    Created via ``AgentKavach.channel()`` factory method. Each channel type
-    requires specific credentials:
+    Created via ``AgentKavach.channel()`` factory method. The target you
+    supply is synced to the AgentKavach cloud, which delivers the alert:
 
-    - ``ChannelType.EMAIL``: ``to`` (recipient address). Resend API key from env or ``api_key``.
+    - ``ChannelType.EMAIL``: ``to`` (recipient address).
     - ``ChannelType.SLACK``: ``webhook_url`` (Slack Incoming Webhook URL).
     - ``ChannelType.PAGERDUTY``: ``routing_key`` (Events API v2 routing key).
     - ``ChannelType.WEBHOOK``: ``url`` (HTTP endpoint). Optional ``secret`` for HMAC signing.
-    - ``ChannelType.KILL``: No credentials. Triggers the ``on_kill`` callback.
+    - ``ChannelType.KILL``: No credentials. Triggers the local ``on_kill`` callback.
+
+    The cloud must be able to reach the endpoint. For a Slack/PagerDuty/
+    webhook target that is only reachable inside your network, expose a
+    cloud-reachable webhook (e.g. a relay) and use ``ChannelType.WEBHOOK``.
     """
 
     channel_type: str
@@ -69,20 +77,11 @@ class ChannelConfig:
     routing_key: str = ""
     url: str = ""
     secret: str = ""
-    api_key: str = ""
     template: Optional[Dict[str, Any]] = None
     # Which budget dimension this channel's threshold evaluates against.
     # Defaults to "cost" for back-compat; YAML loader sets it from the
     # budget block (cost / tokens_total / duration).
     budget_type: str = "cost"
-    # Where this channel is delivered from:
-    #   "backend" (default) — AgentKavach's cloud POSTs to the endpoint. Use for
-    #       public endpoints (email is always backend; public Slack/PagerDuty/
-    #       webhook).
-    #   "sdk" — the SDK delivers from inside your environment. Use for internal /
-    #       on-prem / firewalled endpoints our cloud can't reach. Email cannot be
-    #       "sdk" (it is sent with our Resend key).
-    dispatch: str = "backend"
 
     def __post_init__(self) -> None:
         # Normalize ChannelType enum to string.
@@ -92,14 +91,6 @@ class ChannelConfig:
             raise ValueError(
                 f"Unknown channel type {self.channel_type!r}. "
                 f"Valid types: {', '.join(sorted(VALID_CHANNEL_TYPES))}"
-            )
-        if self.dispatch not in ("backend", "sdk"):
-            raise ValueError(f"dispatch must be 'backend' or 'sdk', got {self.dispatch!r}")
-        if self.dispatch == "sdk" and self.channel_type == "email":
-            raise ValueError(
-                "Email cannot use dispatch='sdk' — email is always sent by the "
-                "AgentKavach backend (Resend). Use dispatch='sdk' for slack / "
-                "pagerduty / webhook endpoints that are internal to your network."
             )
         if not 0 < self.threshold <= 1.0:
             raise ValueError(f"Threshold must be in (0, 1.0], got {self.threshold}")

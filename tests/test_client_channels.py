@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -121,11 +121,10 @@ class TestAgentKavachAlert:
 
 
 class TestChannelsParam:
-    @patch("agentkavach.channels.slack.httpx.Client")
-    def test_channels_registers_handlers(self, mock_cls):
-        # Phase 158: only sdk-dispatched channels register a client-side handler
-        # (backend-dispatched ones are delivered by the cloud). A backend slack
-        # channel still produces a rule, but no client-side handler.
+    def test_channels_produce_rules_no_client_handler(self):
+        # The cloud delivers every channel, so no channel registers a
+        # client-side handler — but each still produces a rule and its target
+        # is synced for cloud delivery.
         cg = AgentKavach(
             api_key="ak_test",
             llm_key="sk-test",
@@ -135,16 +134,20 @@ class TestChannelsParam:
                     "slack",
                     threshold=0.80,
                     webhook_url="https://hooks.slack.com/x",
-                    dispatch="sdk",
                 ),
                 AgentKavach.channel("kill", threshold=1.0),
             ],
         )
-        assert "slack" in cg._dispatcher._channels
+        # slack is cloud-delivered (no client-side handler); only kill ever
+        # appears in the dispatcher channels.
+        assert "slack" not in cg._dispatcher._channels
         assert len(cg._dispatcher.rules) == 2
+        payload = cg._build_sync_payload()
+        acs = {ac["channel"]: ac for ac in payload["alert_configs"]}
+        assert acs["slack"]["target"] == "https://hooks.slack.com/x"
+        assert "dispatch" not in acs["slack"]
 
-    @patch("agentkavach.channels.slack.httpx.Client")
-    def test_backend_channels_not_registered_client_side(self, mock_cls):
+    def test_backend_channels_not_registered_client_side(self):
         cg = AgentKavach(
             api_key="ak_test",
             llm_key="sk-test",
@@ -152,10 +155,13 @@ class TestChannelsParam:
             channels=[
                 AgentKavach.channel(
                     "slack", threshold=0.80, webhook_url="https://hooks.slack.com/x"
-                ),  # dispatch defaults to "backend"
+                ),
             ],
         )
         assert "slack" not in cg._dispatcher._channels
+        payload = cg._build_sync_payload()
+        acs = {ac["channel"]: ac for ac in payload["alert_configs"]}
+        assert acs["slack"]["target"] == "https://hooks.slack.com/x"
 
     def test_channels_builds_rules_from_thresholds(self):
         cg = AgentKavach(
@@ -222,83 +228,88 @@ class TestChannelAutoRegistration:
         cg = AgentKavach(api_key="ak_test", llm_key="sk-test")
         assert len(cg._channels) == 0
 
-    @patch("agentkavach.channels.slack.httpx.Client")
-    def test_slack_registered_from_arg(self, mock_cls):
+    def test_slack_captured_from_arg(self):
+        # Legacy kwargs no longer register a client-side handler; they capture
+        # the target into _channel_configs so the cloud can deliver it.
         cg = AgentKavach(
             api_key="ak_test",
             llm_key="sk-test",
             slack_webhook_url="https://hooks.slack.com/test",
         )
-        assert "slack" in cg._dispatcher._channels
-        assert len(cg._channels) == 1
+        assert "slack" not in cg._dispatcher._channels
+        assert len(cg._channels) == 0
+        slack_cfgs = [c for c in cg._channel_configs if c.channel_type == "slack"]
+        assert len(slack_cfgs) == 1
+        assert slack_cfgs[0].webhook_url == "https://hooks.slack.com/test"
+        assert cg._resolve_channel_target("slack") == "https://hooks.slack.com/test"
 
-    @patch("agentkavach.channels.slack.httpx.Client")
-    def test_slack_not_registered_from_env(self, mock_cls, monkeypatch):
+    def test_slack_not_captured_from_env(self, monkeypatch):
         # Channel credentials are never read from the environment — an env var
-        # alone must not auto-register a channel.
+        # alone must not capture a channel.
         monkeypatch.setenv("AGENTKAVACH_SLACK_WEBHOOK_URL", "https://hooks.slack.com/env")
         cg = AgentKavach(api_key="ak_test", llm_key="sk-test")
         assert "slack" not in cg._dispatcher._channels
+        assert [c for c in cg._channel_configs if c.channel_type == "slack"] == []
 
-    @patch("agentkavach.channels.email.httpx.Client")
-    def test_email_registered(self, mock_cls):
+    def test_email_captured(self):
         cg = AgentKavach(
             api_key="ak_test",
             llm_key="sk-test",
-            resend_api_key="re_test",
             alert_email="team@acme.com",
         )
-        assert "email" in cg._dispatcher._channels
+        # No client-side handler; the recipient is captured for cloud delivery.
+        assert "email" not in cg._dispatcher._channels
+        assert cg._find_email_target() == "team@acme.com"
 
-    @patch("agentkavach.channels.email.httpx.Client")
-    def test_email_needs_both_key_and_address(self, mock_cls):
+    def test_email_without_address_not_captured(self):
         cg = AgentKavach(
             api_key="ak_test",
             llm_key="sk-test",
-            resend_api_key="re_test",
         )
         assert "email" not in cg._dispatcher._channels
+        assert cg._find_email_target() is None
 
-    @patch("agentkavach.channels.pagerduty.httpx.Client")
-    def test_pagerduty_registered(self, mock_cls):
+    def test_pagerduty_captured(self):
         cg = AgentKavach(
             api_key="ak_test",
             llm_key="sk-test",
             pagerduty_routing_key="R0xxx",
         )
-        assert "pagerduty" in cg._dispatcher._channels
+        assert "pagerduty" not in cg._dispatcher._channels
+        assert cg._resolve_channel_target("pagerduty") == "R0xxx"
 
-    @patch("agentkavach.channels.webhook.httpx.Client")
-    def test_webhook_registered(self, mock_cls):
+    def test_webhook_captured(self):
         cg = AgentKavach(
             api_key="ak_test",
             llm_key="sk-test",
             webhook_url="https://example.com/hook",
         )
-        assert "webhook" in cg._dispatcher._channels
+        assert "webhook" not in cg._dispatcher._channels
+        assert cg._resolve_channel_target("webhook") == "https://example.com/hook"
 
-    @patch("agentkavach.channels.webhook.httpx.Client")
-    def test_webhook_with_secret(self, mock_cls):
+    def test_webhook_with_secret(self):
         cg = AgentKavach(
             api_key="ak_test",
             llm_key="sk-test",
             webhook_url="https://example.com/hook",
             webhook_secret="s3cret",
         )
-        assert "webhook" in cg._dispatcher._channels
+        assert "webhook" not in cg._dispatcher._channels
+        assert cg._resolve_channel_target("webhook") == "https://example.com/hook"
+        assert cg._resolve_webhook_secret() == "s3cret"
 
-    @patch("agentkavach.channels.slack.httpx.Client")
-    @patch("agentkavach.channels.pagerduty.httpx.Client")
-    def test_multiple_channels_registered(self, mock_pd, mock_slack):
+    def test_multiple_channels_captured(self):
         cg = AgentKavach(
             api_key="ak_test",
             llm_key="sk-test",
             slack_webhook_url="https://hooks.slack.com/test",
             pagerduty_routing_key="R0xxx",
         )
-        assert "slack" in cg._dispatcher._channels
-        assert "pagerduty" in cg._dispatcher._channels
-        assert len(cg._channels) == 2
+        assert "slack" not in cg._dispatcher._channels
+        assert "pagerduty" not in cg._dispatcher._channels
+        assert len(cg._channels) == 0
+        assert cg._resolve_channel_target("slack") == "https://hooks.slack.com/test"
+        assert cg._resolve_channel_target("pagerduty") == "R0xxx"
 
 
 # ---------------------------------------------------------------------------
@@ -318,34 +329,16 @@ class TestSlackNotRegisteredWithoutUrl:
 
 
 class TestShutdownChannels:
-    @patch("agentkavach.channels.slack.httpx.Client")
-    def test_shutdown_closes_channels(self, mock_cls):
+    def test_shutdown_does_not_raise_with_captured_channels(self):
+        # No channel is delivered client-side anymore, so there are no senders
+        # to close. shutdown() must still complete cleanly.
         cg = AgentKavach(
             api_key="ak_test",
             llm_key="sk-test",
             slack_webhook_url="https://hooks.slack.com/test",
         )
-        mock_close = MagicMock()
-        cg._channels[0].close = mock_close
+        assert cg._channels == []
         cg.shutdown()
-        mock_close.assert_called_once()
-
-    @patch("agentkavach.channels.slack.httpx.Client")
-    def test_shutdown_closes_slack_channel(self, mock_cls):
-        """Verify SlackChannel.close() is called on shutdown."""
-        cg = AgentKavach(
-            api_key="ak_test",
-            llm_key="sk-test",
-            slack_webhook_url="https://hooks.slack.com/test",
-        )
-        # The first (and only) channel should be a SlackChannel.
-        from agentkavach.channels.slack import SlackChannel
-
-        assert isinstance(cg._channels[0], SlackChannel)
-        mock_close = MagicMock()
-        cg._channels[0].close = mock_close
-        cg.shutdown()
-        mock_close.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -433,47 +426,12 @@ class TestBackendDispatchedEmail:
         assert email_acs, "sync payload must include email alert configs"
         assert all(ac.get("target") == "ops@acme.com" for ac in email_acs)
 
-    def test_explicit_api_key_still_takes_client_side_dispatch(self):
-        # When a Resend key IS provided the legacy path should still run —
-        # we don't want backend-dispatch mode to silently break setups that
-        # rely on the SDK to send.
-        ch = ChannelConfig(
-            channel_type="email",
-            threshold=0.5,
-            to="ops@acme.com",
-            api_key="re_test_xxx",
-        )
-        guard = AgentKavach(
-            provider="openai",
-            llm_key="sk-test",
-            agent_name="bot",
-            budget=Budget.daily(1.0),
-            channels=[ch],
-            api_key="ak_dev_x",
-        )
-        email_handlers = [
-            c for c in guard._channels if getattr(c, "_to_email", None) == "ops@acme.com"
-        ]
-        assert len(email_handlers) == 1
 
+class TestBackendDeliveredChannels:
+    """The cloud delivers every channel. None register a client-side handler;
+    each channel's target (and webhook secret) is synced with no dispatch key."""
 
-class TestDispatchMode:
-    """Phase 158: per-channel dispatch mode. sdk-mode channels are delivered
-    client-side (internal endpoints) and fired at their configured thresholds;
-    backend-mode channels are delivered by the cloud and not registered
-    client-side (so they're never double-delivered)."""
-
-    def test_email_cannot_be_sdk(self):
-        with pytest.raises(ValueError, match="Email cannot use dispatch='sdk'"):
-            ChannelConfig(channel_type="email", threshold=0.5, to="a@b.com", dispatch="sdk")
-
-    def test_invalid_dispatch_rejected(self):
-        with pytest.raises(ValueError, match="dispatch must be"):
-            ChannelConfig(
-                channel_type="webhook", threshold=0.5, url="https://x/y", dispatch="cloud"
-            )
-
-    def test_sdk_webhook_registers_client_side_handler(self):
+    def test_webhook_synced_not_registered(self):
         guard = AgentKavach(
             provider="openai",
             llm_key="sk-test",
@@ -484,17 +442,18 @@ class TestDispatchMode:
                 ChannelConfig(
                     channel_type="webhook",
                     threshold=0.05,
-                    url="http://10.0.0.5/alerts",
-                    dispatch="sdk",
+                    url="https://hooks.example.com/alerts",
                 )
             ],
         )
-        # SDK registered a client-side webhook handler...
-        assert "webhook" in guard._dispatcher._channels
-        # ...and the engine fires at the configured 5% threshold.
-        assert 0.05 in guard._engine.thresholds
+        # No client-side handler — the cloud delivers it.
+        assert "webhook" not in guard._dispatcher._channels
+        payload = guard._build_sync_payload()
+        acs = {ac["channel"]: ac for ac in payload["alert_configs"]}
+        assert acs["webhook"]["target"] == "https://hooks.example.com/alerts"
+        assert "dispatch" not in acs["webhook"]
 
-    def test_backend_slack_not_registered_client_side(self):
+    def test_slack_synced_not_registered(self):
         guard = AgentKavach(
             provider="openai",
             llm_key="sk-test",
@@ -506,14 +465,16 @@ class TestDispatchMode:
                     channel_type="slack",
                     threshold=0.05,
                     webhook_url="https://hooks.slack.com/x",
-                )  # dispatch defaults to "backend"
+                )
             ],
         )
-        # Backend-dispatched → no client-side handler (no double-delivery).
         assert "slack" not in guard._dispatcher._channels
+        payload = guard._build_sync_payload()
+        acs = {ac["channel"]: ac for ac in payload["alert_configs"]}
+        assert acs["slack"]["target"] == "https://hooks.slack.com/x"
+        assert "dispatch" not in acs["slack"]
 
-    @patch("agentkavach.channels.pagerduty.httpx.Client")
-    def test_sdk_pagerduty_registers_client_side_handler(self, mock_cls):
+    def test_pagerduty_synced_not_registered(self):
         guard = AgentKavach(
             provider="openai",
             llm_key="sk-test",
@@ -525,34 +486,11 @@ class TestDispatchMode:
                     channel_type="pagerduty",
                     threshold=0.07,
                     routing_key="R0xxx",
-                    dispatch="sdk",
                 )
             ],
         )
-        assert "pagerduty" in guard._dispatcher._channels
-        assert 0.07 in guard._engine.thresholds
-
-    def test_registration_failure_is_swallowed(self):
-        # A handler that raises on construction must not break SDK init — the
-        # failure is logged and the other channels still register.
-        with patch(
-            "agentkavach.channels.slack.SlackChannel",
-            side_effect=RuntimeError("boom"),
-        ):
-            guard = AgentKavach(
-                provider="openai",
-                llm_key="sk-test",
-                agent_name="bot",
-                budget=Budget.daily(1.0),
-                api_key="ak_dev_x",
-                channels=[
-                    ChannelConfig(
-                        channel_type="slack",
-                        threshold=0.05,
-                        webhook_url="https://hooks.slack.com/x",
-                        dispatch="sdk",
-                    )
-                ],
-            )
-        # Construction raised → no handler registered, but no exception bubbled.
-        assert "slack" not in guard._dispatcher._channels
+        assert "pagerduty" not in guard._dispatcher._channels
+        payload = guard._build_sync_payload()
+        acs = {ac["channel"]: ac for ac in payload["alert_configs"]}
+        assert acs["pagerduty"]["target"] == "R0xxx"
+        assert "dispatch" not in acs["pagerduty"]

@@ -4,6 +4,16 @@ All notable changes to the AgentKavach Python SDK are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project follows [Semantic Versioning](https://semver.org/).
 
+## [2.0.0] - 2026-06-20
+
+### Removed
+
+- The per channel `dispatch` setting (breaking). Channels no longer have a `"backend"` vs `"sdk"` delivery mode, and the SDK no longer delivers alerts from inside your process. The `dispatch=` argument to `AgentKavach.channel()` / `ChannelConfig`, the `api_key=` argument on those (the client side email Resend key), the `resend_api_key=` constructor argument, and the YAML `dispatch:` / email `api_key:` keys are all removed.
+
+### Changed
+
+- All alert delivery (email, Slack, PagerDuty, webhook) is now performed by the AgentKavach cloud, which aggregates spend across every agent and fires each alert once at the true combined total. This fixes shared and organization budgets: previously an `"sdk"` channel evaluated its threshold against only one process's spend, so a budget split across many agents could under fire, never fire, or fire duplicated. The SDK now always syncs the channel target (and webhook signing secret) so the cloud can deliver. If a Slack/PagerDuty/webhook endpoint is only reachable inside your network, expose a cloud reachable webhook (for example a relay) and use a `webhook` channel. The in process kill switch (`on_kill`) is unchanged.
+
 ## [1.0.2] - 2026-06-19
 
 First release published from this public repository with verified build provenance (PyPI Trusted Publishing). Functionally equivalent to 1.0.1 plus the dependency fix below.
