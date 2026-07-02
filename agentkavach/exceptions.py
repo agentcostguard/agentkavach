@@ -43,6 +43,34 @@ class BudgetExceededError(Exception):
         self.period = period
 
 
+class IngestRejectedError(BudgetExceededError):
+    """Raised when the AgentKavach backend rejects event ingest for this agent.
+
+    Fired on the first ``create()`` after a permanent 429 from the backend
+    (tier agent-limit, org daily-limit, org-budget-exceeded, or a dashboard
+    Kill). No budget was necessarily exceeded — the agent simply can no
+    longer be tracked, so calls are paused to avoid untracked LLM spend.
+
+    Subclasses ``BudgetExceededError`` so existing ``except
+    BudgetExceededError`` handlers keep working; ``spent``/``limit``/
+    ``period`` are always ``None`` here.
+
+    Attributes:
+        reason: Backend rejection code — ``"tier_agent_limit"``,
+            ``"daily_limit"``, ``"org_budget_exceeded"``, or
+            ``"backend_rejected"`` when the 429 carried no reason.
+    """
+
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        reason: Optional[str] = None,
+    ) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
 class RateLimitedError(Exception):
     """Raised when the AgentKavach API rate limit is hit."""
 

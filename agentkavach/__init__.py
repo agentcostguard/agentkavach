@@ -1,6 +1,6 @@
 """AgentKavach: Hard budget limits for LLM APIs."""
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 
 from agentkavach.alerts import ChannelConfig, ChannelType
 from agentkavach.budget import Budget
@@ -9,6 +9,7 @@ from agentkavach.exceptions import (
     BudgetExceededError,
     CallLimitError,
     GuardrailError,
+    IngestRejectedError,
     LoopDetectedError,
     RateLimitedError,
     RuntimeLimitError,
@@ -28,6 +29,7 @@ __all__ = [
     "BudgetExceededError",
     "CallLimitError",
     "GuardrailError",
+    "IngestRejectedError",
     "LoopDetectedError",
     "RateLimitedError",
     "RuntimeLimitError",

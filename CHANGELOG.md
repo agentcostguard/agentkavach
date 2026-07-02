@@ -4,6 +4,13 @@ All notable changes to the AgentKavach Python SDK are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project follows [Semantic Versioning](https://semver.org/).
 
+## [2.1.0] - 2026-07-01
+
+### Added
+
+- The `on_kill` teardown callback can now receive the kill reason. Declare a parameter (`def on_kill(reason): ...`, or a keyword-only parameter named `reason`) and the SDK passes why the agent was stopped: `"cost"`, `"tokens"`, `"duration"`, `"calls"`, or `"loop"` for in-process kills; the backend rejection code (`"tier_agent_limit"`, `"daily_limit"`, `"org_budget_exceeded"`, `"backend_rejected"`) for a backend stop; `"internal_error"` for `fail_on_error` kills. Zero-argument callbacks keep working unchanged — no migration required.
+- `IngestRejectedError`, raised when the backend rejects event ingest for the agent (tier agent-limit, org daily-limit, org-budget-exceeded, or a dashboard Kill). It subclasses `BudgetExceededError`, so existing `except BudgetExceededError` handlers keep catching it, and carries the rejection code on `.reason`. Previously this path raised a bare `BudgetExceededError`, which misreported a tier rejection as a budget kill — an agent whose budget was barely touched could log "budget exhausted".
+
 ## [2.0.0] - 2026-06-20
 
 ### Removed

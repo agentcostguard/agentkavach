@@ -37,7 +37,7 @@ from agentkavach.alerts import (
 )
 from agentkavach.budget import Budget
 from agentkavach.buffer import Buffer
-from agentkavach.engine import SpendEngine
+from agentkavach.engine import SpendEngine, invoke_on_kill
 from agentkavach.providers import UsageRecord
 from agentkavach.providers.anthropic import calculate_cost as anthropic_cost
 from agentkavach.providers.anthropic import count_tokens as anthropic_count
@@ -143,7 +143,7 @@ class AgentKavach:
         budget: Optional[Budget] = None,
         org_budget: Optional[Budget] = None,
         channels: Optional[Sequence[ChannelConfig]] = None,
-        on_kill: Optional[Callable[[], None]] = None,
+        on_kill: Optional[Callable[..., None]] = None,
         api_key: str = "",
         run_id: Optional[str] = None,
         # Guardrail limits (per-run).
@@ -280,11 +280,17 @@ class AgentKavach:
             rules=rules or AlertDispatcher.rules,
         )
 
-        # Register the built-in "kill" channel.
+        # Register the built-in "kill" channel. The reason passed to the
+        # teardown is the budget dimension whose threshold fired the rule
+        # (normalized to the engine's reason vocabulary: tokens_total →
+        # "tokens"; cost/duration pass through).
         if on_kill is not None:
             self._dispatcher.register_channel(
                 "kill",
-                lambda event, template=None: on_kill(),
+                lambda event, template=None: invoke_on_kill(
+                    on_kill,
+                    {"tokens_total": "tokens"}.get(event.budget_type, event.budget_type),
+                ),
             )
 
         # Channel delivery is performed by the cloud. We only capture each
@@ -578,27 +584,28 @@ class AgentKavach:
         # telemetry will just be dropped server-side. The reason is
         # surfaced in the exception so the caller can act on it.
         if self._backend_paused:
-            from agentkavach.exceptions import BudgetExceededError
+            from agentkavach.exceptions import IngestRejectedError
 
             reason = self._backend_paused_reason or "backend_rejected"
             # Phase 125: a backend stop (dashboard Kill button or tier
             # reject) should run the customer's on_kill teardown, just like
             # an in-process budget kill. Invoke it once, here on the call
             # thread (never on the telemetry thread that set the flag), and
-            # fail-open so a raising callback never masks the stop.
+            # fail-open so a raising callback never masks the stop. The
+            # backend rejection code is passed to callbacks that accept a
+            # reason, so a teardown can log "tier_agent_limit" instead of
+            # misreporting a budget kill.
             if not self._backend_kill_fired:
                 self._backend_kill_fired = True
                 if self._engine.on_kill is not None:
-                    try:
-                        self._engine.on_kill()
-                    except Exception:
-                        logger.exception("on_kill callback raised on backend stop")
-            raise BudgetExceededError(
+                    invoke_on_kill(self._engine.on_kill, reason)
+            raise IngestRejectedError(
                 f"AgentKavach backend rejected ingest for agent "
                 f"{self._agent_name!r} (reason={reason!r}). Calls are "
                 f"paused to avoid wasted LLM spend. Resolve the cause "
                 f"(reactivate the agent, upgrade tier, or wait for the "
-                f"daily reset) and restart the process."
+                f"daily reset) and restart the process.",
+                reason=reason,
             )
 
         model = kwargs.get("model", "unknown")
@@ -643,10 +650,7 @@ class AgentKavach:
             if self._fail_on_error:
                 logger.error("Pre-flight failed with fail_on_error=True: %s", exc)
                 if self._engine.on_kill is not None:
-                    try:
-                        self._engine.on_kill()
-                    except Exception:
-                        logger.exception("on_kill callback raised during fail_on_error")
+                    invoke_on_kill(self._engine.on_kill, "internal_error")
                 else:
                     logger.warning(
                         "fail_on_error triggered but no on_kill callback defined for agent %s "
@@ -712,10 +716,7 @@ class AgentKavach:
             if self._fail_on_error:
                 logger.error("Post-flight failed with fail_on_error=True: %s", exc)
                 if self._engine.on_kill is not None:
-                    try:
-                        self._engine.on_kill()
-                    except Exception:
-                        logger.exception("on_kill callback raised during fail_on_error")
+                    invoke_on_kill(self._engine.on_kill, "internal_error")
                 else:
                     logger.warning(
                         "fail_on_error triggered but no on_kill callback defined for agent %s "
@@ -1495,7 +1496,7 @@ class AgentKavach:
         cls,
         yaml_file: str,
         agent: Optional[str] = None,
-        on_kill: Optional[Callable[[], None]] = None,
+        on_kill: Optional[Callable[..., None]] = None,
         api_key: str = "",
         llm_key: str = "",
     ) -> Dict[str, AgentKavach] | AgentKavach:

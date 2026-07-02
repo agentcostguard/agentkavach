@@ -14,6 +14,7 @@ Usage (internal — called by ``AgentKavach`` client, not by end users):
 from __future__ import annotations
 
 import collections
+import inspect
 import logging
 import threading
 import time
@@ -34,6 +35,54 @@ logger = logging.getLogger(__name__)
 
 # Default alert thresholds when none are configured.
 DEFAULT_THRESHOLDS: tuple[float, ...] = (0.70, 0.90, 1.0)
+
+
+def _on_kill_reason_mode(callback: Callable[..., None]) -> str:
+    """How an ``on_kill`` callback wants the kill reason delivered.
+
+    Returns ``"positional"`` for a positional parameter (``def on_kill(reason)``)
+    or ``*args``, ``"keyword"`` for a keyword-only parameter literally named
+    ``reason``, and ``"none"`` for zero-arg callbacks (the pre-2.1 API).
+    Unintrospectable callables (some C extensions) are treated as zero-arg —
+    fail-safe, never a TypeError inside a teardown.
+    """
+    try:
+        sig = inspect.signature(callback)
+    except (TypeError, ValueError):
+        return "none"
+    for param in sig.parameters.values():
+        if param.kind in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.VAR_POSITIONAL,
+        ):
+            return "positional"
+        if param.kind is inspect.Parameter.KEYWORD_ONLY and param.name == "reason":
+            return "keyword"
+    return "none"
+
+
+def invoke_on_kill(callback: Callable[..., None], reason: Optional[str]) -> None:
+    """Invoke an ``on_kill`` teardown, passing *reason* if the callback accepts it.
+
+    ``reason`` is one of the engine kill reasons (``"cost"``, ``"tokens"``,
+    ``"duration"``, ``"calls"``, ``"loop"``), a backend rejection code
+    (``"tier_agent_limit"``, ``"daily_limit"``, ``"org_budget_exceeded"``,
+    ``"backend_rejected"``), or ``"internal_error"`` (fail_on_error paths).
+    ``None`` when a legacy kill path did not record one.
+
+    Never raises: a failing customer teardown must not mask the kill itself.
+    """
+    try:
+        mode = _on_kill_reason_mode(callback)
+        if mode == "positional":
+            callback(reason)
+        elif mode == "keyword":
+            callback(reason=reason)
+        else:
+            callback()
+    except Exception:
+        logger.exception("on_kill callback raised an exception")
 
 
 @dataclass
@@ -69,7 +118,9 @@ class SpendEngine:
     budget: Budget
     agent_name: str = "default"
     thresholds: tuple[float, ...] = DEFAULT_THRESHOLDS
-    on_kill: Optional[Callable[[], None]] = None
+    # Teardown callback. Zero-arg (legacy) or one-arg — a callback that
+    # declares a parameter receives the kill reason (see invoke_on_kill).
+    on_kill: Optional[Callable[..., None]] = None
 
     # Optional org-level budget — enforced alongside the primary budget.
     # The most restrictive wins: both must have remaining capacity.
@@ -410,10 +461,7 @@ class SpendEngine:
         """
         if self._killed and self.on_kill is not None and not self._on_kill_fired:
             self._on_kill_fired = True
-            try:
-                self.on_kill()
-            except Exception:
-                logger.exception("on_kill callback raised an exception")
+            invoke_on_kill(self.on_kill, self._kill_reason)
 
     def record_partial(
         self,
